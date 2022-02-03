@@ -690,17 +690,15 @@ class InnerProductCircuitComposer(ParallelTorchQkernelComposer):
         '''params is a np.ndarray that has dimension (n_batch, n_qubits, layers). It stores rotation angles that will be learned'''
         self.n_batch = params.shape[0]
         self.layers = params.shape[2]
-        self.layer_of_Hadamards()
-        is_z = True
-        for layer in range(self.layers):
-            if is_z:
-                gate = self.operators.ZPhase
-            else:
-                gate = self.operators.YPhase
-            is_z = not is_z
-            layer_params = params[:, :, layer]
-            self.variational_layer(gate, layer_params)
-            self.entangling_layer(is_z)
+        #self.layer_of_Hadamards()
+        is_inverse = False
+        for layer in range(self.layers//2):
+            layer_params = params[:, :, int(layer*2)]
+            self.variational_layer(self.operators.ZPhase, layer_params)
+            layer_params = params[:, :, int(layer*2+1)]
+            self.variational_layer(self.operators.YPhase, layer_params)
+            self.entangling_layer(is_inverse)
+            is_inverse = not is_inverse
 
     '''Building circuit whose first amplitude is the expectation value of the measured circuit wrt to the cost_operator'''
     def updated_expectation_circuit(self, params1, params2):
