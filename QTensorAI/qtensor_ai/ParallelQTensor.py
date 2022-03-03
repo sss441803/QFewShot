@@ -448,7 +448,7 @@ class ZZ(ParallelParametricGate):
             self.t = torch.tensor([[-1, +1],[+1, -1]]).to(device)
         super().__init__(*qubits, **parameters)
 
-    def gen_tensor(self):
+    def gen_tensor(self, **parameters):
         alpha = self.parameters['alpha']
         device = alpha.device
         return torch_j_exp(1j*alpha.unsqueeze(1)[:,None]*self.t*np.pi/2)
@@ -488,8 +488,9 @@ class YPhase(ParallelParametricGate):
         alpha = parameters['alpha']
         c = torch.cos(np.pi * alpha / 2).unsqueeze(1)[:,None]*self.ct
         s = torch.sin(np.pi * alpha / 2).unsqueeze(1)[:,None]*self.st
-        g = torch_j_exp(1j * np.pi * alpha / 2).unsqueeze(1)[:,None]
-        return g*(c + s)
+        #g = torch_j_exp(1j * np.pi * alpha / 2).unsqueeze(1)[:,None]
+        #return g*(c + s)
+        return c+s
     
 class XPhase(ParallelParametricGate):
     name = 'XPhase'
@@ -649,6 +650,8 @@ class ParallelTorchQkernelComposer(CircuitComposer):
     def name():
         return 'Qkernel'
 
+
+
 class InnerProductCircuitComposer(ParallelTorchQkernelComposer):
 
     def __init__(self, n_qubits):
@@ -715,7 +718,7 @@ class InnerProductCircuitComposer(ParallelTorchQkernelComposer):
 
     def expectation_circuit(self, params1, params2):
         new_circuit = self.updated_expectation_circuit(params1, params2)
-        print(new_circuit)
+
         if len(self.static_circuit) != 0:
             for self_op, new_op in zip(self.static_circuit, new_circuit):
                 if isinstance(self_op, ParallelParametricGate):
@@ -729,6 +732,128 @@ class InnerProductCircuitComposer(ParallelTorchQkernelComposer):
 
     def name():
         return 'InnerProduct'
+
+
+
+class MetricLearningCircuitComposer(ParallelTorchQkernelComposer):
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.device = 'cpu'
+        self.expectation_circuit_initialized = False
+        self.static_circuit = []
+        super().__init__(n_qubits)
+    
+    def zz_layer(self, zz_params):
+        for i in range(self.n_qubits//2):
+            control_qubit = self.qubits[2*i]
+            target_qubit = self.qubits[2*i+1]
+            self.apply_gate(self.operators.ZZ, control_qubit, target_qubit, alpha=zz_params[:,control_qubit], device=self.device, is_placeholder = self.expectation_circuit_initialized)
+        for i in range((self.n_qubits+1)//2-1):
+            control_qubit = self.qubits[2*i+1]
+            target_qubit = self.qubits[2*i+2]
+            self.apply_gate(self.operators.ZZ, control_qubit, target_qubit, alpha=zz_params[:,control_qubit], device=self.device, is_placeholder = self.expectation_circuit_initialized)
+    
+    '''A single layer of rotation gates depending on trainable parameters'''
+    def variational_layer(self, gate, layer_params):
+        for i in range(self.n_qubits):
+            qubit = self.qubits[i]
+            self.apply_gate(gate, qubit, alpha=layer_params[:, i], device=self.device, is_placeholder = self.expectation_circuit_initialized)
+    
+    '''Building circuit that needs to be measured'''
+    def circuit(self, inputs, zz_params, y_params):
+        '''data is a np.ndarray that has dimension (n_batch, n_qubits). It contains data to be encoded'''
+        '''params is a np.ndarray that has dimension (n_batch, n_qubits, layers). It stores rotation angles that will be learned'''
+        self.n_batch = inputs.shape[0]
+        self.layers = zz_params.shape[2]
+        for layer in range(self.layers):
+            self.variational_layer(self.operators.XPhase, inputs)
+            layer_zz_params = zz_params[:, :, layer]
+            self.zz_layer(layer_zz_params)
+            layer_y_params = y_params[:, :, layer]
+            self.variational_layer(self.operators.YPhase, layer_y_params)
+        self.variational_layer(self.operators.XPhase, inputs)
+
+    '''Building circuit whose first amplitude is the expectation value of the measured circuit wrt to the cost_operator'''
+    def updated_expectation_circuit(self, inputs1, inputs2, zz_params, y_params):
+        self.builder.reset()
+        self.device = inputs1.device
+        self.circuit(inputs1, zz_params, y_params)
+        first_part = self.builder.circuit
+        self.builder.reset()
+        self.circuit(inputs2, zz_params, y_params)
+        self.builder.inverse()
+        second_part = self.builder.circuit
+        self.builder.reset()
+        return first_part + second_part
+
+    def expectation_circuit(self, inputs1, inputs2, zz_params, y_params):
+        new_circuit = self.updated_expectation_circuit(inputs1, inputs2, zz_params, y_params)
+
+        if len(self.static_circuit) != 0:
+            for self_op, new_op in zip(self.static_circuit, new_circuit):
+                if isinstance(self_op, ParallelParametricGate):
+                    self_op._parameters['alpha'] = new_op._parameters['alpha']
+                else:
+                    self_op._parameters['n_batch'] = new_op._parameters['n_batch']
+        else:
+            '''Initializing circuit'''
+            self.static_circuit = new_circuit
+            self.expectation_circuit_initialized = True
+
+    def name():
+        return 'MetricLearning'
+
+
+
+class OptimalMetricCircuitComposer(MetricLearningCircuitComposer):
+    
+    def __init__(self, n_qubits):
+        super().__init__(n_qubits)
+
+    '''Building circuit that needs to be measured'''
+    def circuit(self, inputs, zz_params, x_params):
+        '''data is a np.ndarray that has dimension (n_batch, n_qubits). It contains data to be encoded'''
+        '''params is a np.ndarray that has dimension (n_batch, n_qubits, layers). It stores rotation angles that will be learned'''
+        self.n_batch = inputs.shape[0]
+        self.layers = zz_params.shape[2]
+        for layer in range(self.layers):
+            self.variational_layer(self.operators.YPhase, inputs)
+            layer_zz_params = zz_params[:, :, layer]
+            self.zz_layer(layer_zz_params)
+            layer_x_params = x_params[:, :, layer]
+            self.variational_layer(self.operators.XPhase, layer_x_params)
+        self.variational_layer(self.operators.YPhase, inputs)
+
+        '''Building circuit whose first amplitude is the expectation value of the measured circuit wrt to the cost_operator'''
+    def updated_expectation_circuit(self, inputs1, inputs2, zz_params, x_params):
+        self.builder.reset()
+        self.device = inputs1.device
+        self.circuit(inputs1, zz_params, x_params)
+        first_part = self.builder.circuit
+        self.builder.reset()
+        self.circuit(inputs2, zz_params, x_params)
+        self.builder.inverse()
+        second_part = self.builder.circuit
+        self.builder.reset()
+        return first_part + second_part
+
+    def expectation_circuit(self, inputs1, inputs2, zz_params, x_params):
+        new_circuit = self.updated_expectation_circuit(inputs1, inputs2, zz_params, x_params)
+
+        if len(self.static_circuit) != 0:
+            for self_op, new_op in zip(self.static_circuit, new_circuit):
+                if isinstance(self_op, ParallelParametricGate):
+                    self_op._parameters['alpha'] = new_op._parameters['alpha']
+                else:
+                    self_op._parameters['n_batch'] = new_op._parameters['n_batch']
+        else:
+            '''Initializing circuit'''
+            self.static_circuit = new_circuit
+            self.expectation_circuit_initialized = True
+
+    def name():
+        return 'OptimalMetric'
 
 ########################################################################
 #Defining parallel tensornetwork class                                 #

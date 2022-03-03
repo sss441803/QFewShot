@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from .ParallelQTensor import ParallelTorchQkernelComposer, InnerProductCircuitComposer, ParallelQtreeSimulator, ParallelQtreeTensorNet, ParallelTorchBackend
+from .ParallelQTensor import OptimalMetricCircuitComposer, MetricLearningCircuitComposer, ParallelTorchQkernelComposer, InnerProductCircuitComposer, ParallelQtreeSimulator, ParallelQtreeTensorNet, ParallelTorchBackend
 from qtensor.optimisation.Optimizer import DefaultOptimizer, TamakiOptimizer
 
 import os
@@ -121,6 +121,85 @@ class InnerProduct(nn.Module):
         self.com.expectation_circuit(params1, params2)
         out = self.sim.simulate_batch(self.com.static_circuit, peo=self.peo) # (out_features*n_batch)
         return out
+
+
+'''Following arXiv:2001.03622. Embedding circuit with variational parameters. Embedds classical vectors in the quantum Hilbert space and takes their inner product'''
+class MetricLearning(nn.Module):
+    
+    def __init__(self, n_qubits, n_layers, optimizer=DefaultOptimizer()):
+        super().__init__()
+                
+        '''Initializing module parameters'''
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+
+        '''Initializing quantum circuit parameters (Not input to be embedded)'''
+        device = 'cpu'
+        if torch.cuda.is_available():
+            device = 'cuda'
+        self.zz_params = nn.Parameter(torch.rand(1, n_qubits-1, n_layers, dtype=torch.float32)).to(device)
+        self.y_params = nn.Parameter(torch.rand(1, n_qubits, n_layers, dtype=torch.float32)).to(device)
+        
+        '''Initializing simulator'''
+        self.sim = ParallelQtreeSimulator(backend=ParallelTorchBackend())
+        
+        '''Tree optimization'''
+        inputs1_filler = torch.rand(1, n_qubits, requires_grad=False).to(device)
+        inputs2_filler = torch.rand(1, n_qubits, requires_grad=False).to(device)
+        self.com = MetricLearningCircuitComposer(n_qubits)
+        self.com.expectation_circuit(inputs1_filler, inputs2_filler, self.zz_params, self.y_params)
+        tn, _, _ = ParallelQtreeTensorNet.from_qtree_gates(self.com.static_circuit)
+        
+        '''peo is the tensor network contraction order'''
+        self.peo = circuit_optimization(n_qubits, n_layers, tn, optimizer, MetricLearningCircuitComposer)
+
+    def forward(self, inputs1, inputs2):
+        n_batch = inputs1.shape[0]
+        zz_params = self.zz_params.expand(n_batch, -1, -1) # (n_batch, n_qubits-1, n_layers)
+        y_params = self.y_params.expand(n_batch, -1, -1) # (n_batch, n_qubits, n_layers)
+        self.com.expectation_circuit(inputs1, inputs2, zz_params, y_params)
+        out = self.sim.simulate_batch(self.com.static_circuit, peo=self.peo) # (out_features*n_batch)
+        return out
+
+class OptimalMetric(nn.Module):
+
+    def __init__(self, n_qubits, n_layers, optimizer=DefaultOptimizer()):
+        super().__init__()
+                
+        '''Initializing module parameters'''
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+
+        '''Initializing quantum circuit parameters (Not input to be embedded)'''
+        device = 'cpu'
+        if torch.cuda.is_available():
+            device = 'cuda'
+        self.zz_params = nn.Parameter(torch.randn(1, n_qubits-1, n_layers, dtype=torch.float32, requires_grad=True, device=device))
+        self.x_params = nn.Parameter(torch.randn(1, n_qubits, n_layers, dtype=torch.float32, requires_grad=True, device=device))
+        #self.zz_params = torch.zeros(1, n_qubits-1, n_layers, dtype=torch.float32).to(device)
+        #self.x_params = torch.zeros(1, n_qubits, n_layers, dtype=torch.float32).to(device)
+        
+        '''Initializing simulator'''
+        self.sim = ParallelQtreeSimulator(backend=ParallelTorchBackend())
+        
+        '''Tree optimization'''
+        inputs1_filler = torch.rand(1, n_qubits, requires_grad=False).to(device)
+        inputs2_filler = torch.rand(1, n_qubits, requires_grad=False).to(device)
+        self.com = OptimalMetricCircuitComposer(n_qubits)
+        self.com.expectation_circuit(inputs1_filler, inputs2_filler, self.zz_params, self.x_params)
+        tn, _, _ = ParallelQtreeTensorNet.from_qtree_gates(self.com.static_circuit)
+        
+        '''peo is the tensor network contraction order'''
+        self.peo = circuit_optimization(n_qubits, n_layers, tn, optimizer, OptimalMetricCircuitComposer)
+
+    def forward(self, inputs1, inputs2):
+        n_batch = inputs1.shape[0]
+        zz_params = self.zz_params.expand(n_batch, -1, -1) # (n_batch, n_qubits-1, n_layers)
+        x_params = self.x_params.expand(n_batch, -1, -1) # (n_batch, n_qubits, n_layers)
+        self.com.expectation_circuit(inputs1, inputs2, zz_params, x_params)
+        out = self.sim.simulate_batch(self.com.static_circuit, peo=self.peo) # (out_features*n_batch)
+        return out
+        
 
 # Function for returning the contraction order. Searching if previously saved contraction orders exist.
 def circuit_optimization(n_qubits, n_layers, tn, optimizer, composer):

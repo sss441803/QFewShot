@@ -23,6 +23,12 @@ class Engine(object):
             'stop': False
         }
 
+        #state['optimizer'] = state['optim_method']([
+        #        {'params': state['model'].encoder.parameters()},
+        #        {'params': state['model'].optimalmetric.zz_params, 'lr': 1e-4},
+        #        {'params': state['model'].optimalmetric.x_params, 'lr': 1e-4}
+        #    ], **state['optim_config'])
+
         state['optimizer'] = state['optim_method'](state['model'].parameters(), **state['optim_config'])
 
         self.hooks['on_start'](state)
@@ -50,8 +56,10 @@ class Engine(object):
                 state['batch'] += 1
                 self.hooks['on_update'](state)
 
+
             state['epoch'] += 1
             state['batch'] = 0
             self.hooks['on_end_epoch'](state)
+            #print('zz params: ', state['model'].optimalmetric.zz_params, '\nx params: ', state['model'].optimalmetric.x_params)
 
         self.hooks['on_end'](state)
